@@ -3,81 +3,32 @@
  * NTSC/CRT - Integer-only NTSC video signal encoding / decoding emulation
  *
  *   by EMMIR 2018-2023
- *   FreePascal port by hukka 2025
+ *   FreePascal port by hukka 2025 with help from muzzy
  *
+ *   Github (original): https://github.com/LMP88959/NTSC-CRT
+ *   Github (FPC port): https://github.com/hukkax/ntsc_crt_pas
  *   YouTube: https://www.youtube.com/@EMMIR_KC/videos
  *   Discord: https://discord.com/invite/hdYctSmyQJ
  *
  *****************************************************************************}
 unit ntsc_crt_base;
 
-{$MODE DELPHI}{$H+}
-{$POINTERMATH ON}
-
-{.$DEFINE USE_CONVOLUTION} // TODO
-{.$DEFINE CRT_CC_5_SAMPLES}
+{$I ntsc_crt_options.inc}
 
 interface
 
 uses
-	Classes, SysUtils;
+	{$IFDEF MEASURE_TIMING} TimeMeasurer, {$ENDIF}
+	Classes, SysUtils,
+	ntsc_crt_common;
 
 type
-	TCRTPixelFormat = (
-		CRT_PIX_FORMAT_RGB,   // 3 bytes per pixel [R,G,B,R,G,B,R,G,B...]
-		CRT_PIX_FORMAT_BGR,   // 3 bytes per pixel [B,G,R,B,G,R,B,G,R...]
-		CRT_PIX_FORMAT_ARGB,  // 4 bytes per pixel [A,R,G,B,A,R,G,B...]
-		CRT_PIX_FORMAT_RGBA,  // 4 bytes per pixel [R,G,B,A,R,G,B,A...]
-		CRT_PIX_FORMAT_ABGR,  // 4 bytes per pixel [A,B,G,R,A,B,G,R...]
-		CRT_PIX_FORMAT_BGRA   // 4 bytes per pixel [B,G,R,A,B,G,R,A...]
-	);
-
-const
-	{$IFDEF CRT_CC_5_SAMPLES}
-	CRT_CC_SAMPLES = 5;
-	{$ELSE}
-	CRT_CC_SAMPLES = 4;
-	{$ENDIF}
-
-	HISTLEN = 3;
-	HISTOLD = HISTLEN - 1;      // oldest entry
-	HISTNEW = 0;                // newest entry
-	EQ_P    = 16;               // if changed, the gains will need to be adjusted
-	EQ_R    = 1 shl (EQ_P - 1); // rounding
-
-	{$IFDEF USE_CONVOLUTION}
-	USE_7_SAMPLE_KERNEL = 1;
-	USE_6_SAMPLE_KERNEL = 0;
-	USE_5_SAMPLE_KERNEL = 0;
-	{$ENDIF}
-
-// ************************************************************************************************
-// Filters
-// ************************************************************************************************
-
-type
-	TEQF = record
-	private
-		{$IFDEF USE_CONVOLUTION}
-		h: array[0..6] of Integer;
-		{$ELSE}
-		// three band equalizer
-		lf, hf: Integer; // fractions
-		g: array [0..2] of Integer; // gains
-		fL, fH: array [0..3] of Integer;
-		h: array [0..HISTLEN-1] of Integer; // history
-		{$ENDIF}
-	public
-		procedure Init(f_lo, f_hi, rate, g_lo, g_mid, g_hi: Integer);
-		procedure Reset;
-		function  EQF(s: Integer): Integer;
-	end;
-
 	TNTSCCRTBase = class
 	type
 		TOutRec = record
 			y, i, q: Integer;
 		end;
+
 	const
 		(*
 		 *                      FULL HORIZONTAL LINE SIGNAL (~63500 ns)
@@ -103,14 +54,12 @@ type
 		HB_ns    = (FP_ns + SYNC_ns + BW_ns + CB_ns + BP_ns); // h blank
 		// line duration should be ~63500 ns
 		LINE_ns  = (FP_ns + SYNC_ns + BW_ns + CB_ns + BP_ns + AV_ns);
+
 	protected
 		data:     PByte;   // input image data
 		Format:   TCRTPixelFormat; // output pixel format
 		output:   PByte;           // output image buffer
 		outrec:   array of TOutRec;
-
-		// keep track of sync over frames
-		HSync, VSync: Integer;
 
 		// faster color carrier convergence
 		ccf: array of array of Integer;
@@ -125,16 +74,13 @@ type
 		v_fac: Cardinal;
 
 		// interlaced modes only
-		field:            Integer;  // 0 = even, 1 = odd
-		frame:            Integer;  // 0 = even, 1 = odd
-
-		xoffset:     Word;    // x offset in sample space. 0 is minimum value
-		yoffset:     Word;    // y offset in # of lines. 0 is minimum value
+		field, frame:  Integer;  // 0 = even, 1 = odd
 
 		L_FREQ, Y_FREQ, I_FREQ, Q_FREQ: Cardinal;
 
-		// 0 = vertical  chroma (228.0 chroma clocks per line)
+		// 0 = vertical  chroma (228 chroma clocks per line)
 		// 1 = checkered chroma (227.5 chroma clocks per line)
+		// 2 = sawtooth  chroma (227.3 chroma clocks per line)
 		CRT_CHROMA_PATTERN: Byte;
 
 		CRT_CC_LINE: Word;
@@ -148,7 +94,6 @@ type
 		CRT_BOT:        Word; // final line with active video
 		CRT_LINES:      Word; // number of active video lines
 
-		//CRT_CC_SAMPLES: Byte; // samples per chroma period (samples per 360 deg)
 		CRT_CC_VPER:    Byte; // vertical period in which the artifacts repeat
 
 		CRT_HSYNC_WINDOW,     // search windows, in samples
@@ -172,13 +117,24 @@ type
 
 		eqY, eqI, eqQ: TEQF;
 
-		// internal state
-		initialized:      Boolean;
+		procedure InitPulses; virtual;
 
-		procedure DoInit; virtual;
+		procedure SetChromaPattern(Value: Byte);
+
 	public
+		{$IFDEF MEASURE_TIMING}
+		Timing: record
+			Modulation,
+			Demodulation: Single;
+			Measurer:     TTimeMeasurer;
+		end;
+		{$ENDIF}
+
 		Width,
-		Height:   Word;            // output width/height
+		Height:      Word;    // output width/height
+
+		xoffset:     Word;    // x offset in sample space. 0 is minimum value
+		yoffset:     Word;    // y offset in # of lines. 0 is minimum value
 
 		// image settings
 		Stretch:     Boolean; // scale image to fit monitor?
@@ -193,268 +149,116 @@ type
 
 		Progressive:  Boolean; // progressive or interlaced mode?
 
-		DoVSync:      Boolean;
-		DoHSync:      Boolean;
-		DoBloom:      Boolean;
-		DoBlend:      Boolean; // blend new field onto previous image?
+		DoFadePhosphors: Boolean;
+		DoVSync:         Boolean;
+		DoHSync:         Boolean;
+		DoBloom:         Boolean;
+		DoBlend:         Boolean;  // blend new field onto previous image?
 
 		// VHS
-		DoAberration: Boolean;
-		DoVHSNoise:   Boolean; // want noise at the bottom of the frame?
+		DoAberration:    Boolean;
+		DoVHSNoise:      Boolean;  // want noise at the bottom of the frame?
+		MaxRandom:       Cardinal;
 
-		constructor Create(aWidth, aHeight: Word; aFormat: TCRTPixelFormat; Buffer: Pointer); virtual;
+		// keep track of sync over frames
+		HSync, VSync: Integer;
+
+		property  FirstLine:     Word read CRT_TOP;
+		property  ChromaPattern: Byte read CRT_CHROMA_PATTERN write SetChromaPattern;
+
+		constructor Create; virtual;
 		destructor  Destroy; override;
 
+		procedure Changed; virtual;
 		procedure Reset; virtual;
-		procedure Resize(aWidth, aHeight: Word; aFormat: TCRTPixelFormat; Buffer: Pointer); virtual;
-		procedure OptionsChanged; virtual;
+		procedure Resize(aWidth, aHeight: Word; aFormat: TCRTPixelFormat; DestBuffer: Pointer); virtual;
 
 		procedure Modulate; virtual; abstract;
 		procedure Demodulate; virtual;
-		procedure ProcessFrame(Buffer: Pointer); virtual;
+		procedure FadePhosphors; virtual;
+		procedure ProcessFrame(Buffer: Pointer = nil); virtual;
 	end;
-
-
-	function  POSMOD(x, n: Integer): Integer; inline;
-	function  sintabil8(n: Integer): Integer;
-	procedure crt_sincos14(out s: Integer; out c: Integer; n: Integer);
-	function  crt_bpp4fmt(Format: TCRTPixelFormat): Integer;
 
 
 implementation
 
-
-const
-	// significant points on sine wave (15-bit)
-	sigpsin15: array[0..17] of Integer = (
-		$0000,
-		$0c88, $18f8, $2528, $30f8, $3c50, $4718, $5130, $5a80,
-		$62f0, $6a68, $70e0, $7640, $7a78, $7d88, $7f60, $8000,
-		$7f60
-	);
-
-
-// ************************************************************************************************
-// Utility
-// ************************************************************************************************
-
-// fixed point sin/cos
-const
-	T14_2PI  = 16384;
-	T14_MASK = T14_2PI - 1;
-	T14_PI   = T14_2PI div 2;
-
-// ensure negative values for x get properly modulo'd
-function POSMOD(x, n: Integer): Integer; inline;
-begin
-	Result := (x mod (n) + n) mod n;
-end;
-
-function sintabil8(n: Integer): Integer;
-var
-	f, i, a, b: Integer;
-begin
-	// looks scary but if you don't change T14_2PI
-	// it won't cause out of bounds memory reads
-	f := n and $FF;
-	i := n >> 8 and $FF;
-	a := sigpsin15[i];
-	b := sigpsin15[i+1];
-
-	Result := a + SarLongint((b - a) * f, 8);
-end;
-
-// 14-bit interpolated sine/cosine
-procedure crt_sincos14(out s: Integer; out c: Integer; n: Integer);
-var
-	h: Integer;
-begin
-	n := n and T14_MASK;
-	h := n and ((T14_2PI >> 1) - 1);
-
-	if h > ((T14_2PI >> 2) - 1) then
-	begin
-		c := -sintabil8(h - (T14_2PI >> 2));
-		s := +sintabil8((T14_2PI >> 1) - h);
-	end
-	else
-	begin
-		c := sintabil8((T14_2PI >> 2) - h);
-		s := sintabil8(h);
-	end;
-	if n > ((T14_2PI >> 1) - 1) then
-	begin
-		c := -c;
-		s := -s;
-	end;
-end;
-
-// Get the bytes per pixel for a certain TCRTPixelFormat
-// returns 0 if the specified format does not exist
-//
-function crt_bpp4fmt(Format: TCRTPixelFormat): Integer;
-begin
-	case Format of
-		CRT_PIX_FORMAT_RGB,
-		CRT_PIX_FORMAT_BGR:
-			Result := 3;
-		CRT_PIX_FORMAT_ARGB,
-		CRT_PIX_FORMAT_RGBA,
-		CRT_PIX_FORMAT_ABGR,
-		CRT_PIX_FORMAT_BGRA:
-			Result := 4;
-		else
-			Result := 0;
-	end;
-end;
-
-// ************************************************************************************************
-// TEQF
-// ************************************************************************************************
-
-// f_lo - low cutoff frequency
-// f_hi - high cutoff frequency
-// rate - sampling rate
-// g_lo, g_mid, g_hi - gains
-//
-procedure TEQF.Init(f_lo, f_hi, rate, g_lo, g_mid, g_hi: Integer);
-var
-	sn, cs: Integer;
-begin
-	Reset;
-
-	g[0] := g_lo;
-	g[1] := g_mid;
-	g[2] := g_hi;
-
-	crt_sincos14(sn, cs, T14_PI * f_lo div rate);
-	if EQ_P >= 15 then
-		lf := 2 * (sn << (EQ_P - 15))
-	else
-		lf := 2 * (sn >> (15 - EQ_P));
-
-	crt_sincos14(sn, cs, T14_PI * f_hi div rate);
-	if EQ_P >= 15 then
-		hf := 2 * (sn << (EQ_P - 15))
-	else
-		hf := 2 * (sn >> (15 - EQ_P));
-end;
-
-procedure TEQF.Reset;
-var
-	i: Integer;
-begin
-	{$IFNDEF USE_CONVOLUTION}
-	for i := 0 to High(fL) do
-	begin
-		fL[i] := 0;
-		fH[i] := 0;
-	end;
-	{$ENDIF}
-	for i := 0 to High(h) do
-		h[i] := 0;
-end;
-
-(*
-function TEQF.EQF(s: Integer): Integer;
-var
-	i, h: ^Integer;
-begin
-	h := f.h;
-	for i := 6 downto 1 do
-		h[i] := h[i-1];
-	h[0] := s;
-
-	{$IF USE_7_SAMPLE_KERNEL}
-	{ index : 0 1 2 3 4 5 6 }
-	{ weight: 1 4 7 8 7 4 1 }
-	Result := (s + h[6] + ((h[1] + h[5]) * 4) + ((h[2] + h[4]) * 7) + (h[3] * 8)) >> 5;
-	{$ELSIF USE_6_SAMPLE_KERNEL}
-	{ index : 0 1 2 3 4 5 }
-	{ weight: 1 3 4 4 3 1 }
-	Result := (s + h[5] + 3 * (h[1] + h[4]) + 4 * (h[2] + h[3])) >> 4;
-	{$ELSIF USE_5_SAMPLE_KERNEL}
-	{ index : 0 1 2 3 4 }
-	{ weight: 1 2 2 2 1 }
-	Result := (s + h[4] + ((h[1] + h[2] + h[3])  shl  1)) >> 3;
-	{$ELSE}
-	{ index : 0 1 2 3 }
-	{ weight: 1 1 1 1 }
-	Result := (s + h[3] + h[1] + h[2]) >> 2;
-	{$ENDIF}
-end;
-*)
-
-function TEQF.EQF(s: Integer): Integer;
-var
-	i: Integer;
-	r: array [0..2] of Integer;
-begin
-	{$R-}
-	fL[0] += SarLongint(lf * (s - fL[0]) + EQ_R, EQ_P);
-	fH[0] += SarLongint(hf * (s - fH[0]) + EQ_R, EQ_P);
-
-	for i := 1 to 3 do
-	begin
-		fL[i] += SarLongint(lf * (fL[i-1] - fL[i]) + EQ_R, EQ_P);
-		fH[i] += SarLongint(hf * (fH[i-1] - fH[i]) + EQ_R, EQ_P);
-	end;
-
-	r[0] := fL[3];
-	r[1] := fH[3] - fL[3];
-	r[2] := h[HISTOLD] - fH[3];
-
-	for i := 0 to 2 do
-		r[i] := SarLongint(r[i] * g[i], EQ_P);
-
-	for i := HISTOLD downto 1 do
-		h[i] := h[i-1];
-
-	h[HISTNEW] := s;
-
-	Result := r[0] + r[1] + r[2];
-end;
+{$R-}{$Q-}  // switch off overflow and range checking
 
 // ************************************************************************************************
 // TNTSCCRTBase
 // ************************************************************************************************
 
-procedure TNTSCCRTBase.ProcessFrame(Buffer: Pointer);
+procedure TNTSCCRTBase.FadePhosphors;
+var
+	i: Integer;
+	c: Cardinal;
+	v: ^Cardinal;
 begin
-	Data := Buffer;
-	if Data = nil then Exit;
-
-	Modulate;
-	Demodulate;
-
-	if not Progressive then
+	v := @output[0];
+	for i := 0 to Width*Height-1 do
 	begin
-		field := field xor 1;
-		Modulate;
-		Demodulate;
-		frame := frame xor 1; // a frame is two fields
+		c := v[i] and $FFFFFF;
+		v[i] :=
+			(c >> 1 and $7F7F7F) +
+			(c >> 2 and $3F3F3F) +
+			(c >> 3 and $1F1F1F) +
+			(c >> 4 and $0F0F0F);
 	end;
 end;
 
+procedure TNTSCCRTBase.ProcessFrame(Buffer: Pointer);
+begin
+	if Buffer <> nil then
+		Data := Buffer;
+
+	if Data = nil then Exit;
+
+	if field = 0 then
+		frame := frame xor 1; // a frame is two fields
+
+	if DoFadePhosphors then
+		FadePhosphors
+	else
+		FillByte(output[0], Width*Height*crt_bpp4fmt[Format]-1, 0);
+
+	{$IFDEF MEASURE_TIMING}
+	Timing.Measurer.Start;
+		Modulate;
+	Timing.Measurer.Stop;
+	Timing.Modulation := Timing.Measurer.MillisecondsFloat;
+
+	Timing.Measurer.Start;
+		Demodulate;
+	Timing.Measurer.Stop;
+	Timing.Demodulation := Timing.Measurer.MillisecondsFloat;
+	{$ELSE}
+	Modulate;
+	Demodulate;
+	{$ENDIF}
+
+	if not Progressive then
+		field := field xor 1;
+end;
+
 // Updates the output image parameters
-// * w   - width of the output image
-// * h   - height of the output image
-// * f   - format of the output image
-// * out - pointer to output image data
+// * aWidth:     width of the output image
+// * aHeight:    height of the output image
+// * aFormat:    pixel format of the output image
+// * DestBuffer: pointer to output image data
 //
-procedure TNTSCCRTBase.Resize(aWidth, aHeight: Word; aFormat: TCRTPixelFormat; Buffer: Pointer);
+procedure TNTSCCRTBase.Resize(aWidth, aHeight: Word; aFormat: TCRTPixelFormat; DestBuffer: Pointer);
 begin
 	Width  := aWidth;
 	Height := aHeight;
 	Format := aFormat;
-	output := Buffer;
+	output := DestBuffer;
 end;
 
 // Resets the CRT settings back to their defaults
 //
 procedure TNTSCCRTBase.Reset;
 begin
-	Hue         := 3;
+	Hue         := 0;
 	Saturation  := 75;
 	Brightness  := 0;
 	Contrast    := 180;
@@ -465,32 +269,125 @@ begin
 
 	Stretch := True;
 	Scanlines := 0;
-	Noise := 5;
+	Noise := 6;
 	Monochrome := False;
-	Progressive := True;
+	Progressive := False;
 	DoBlend := False;
-	DoVSync := False;
-	DoHSync := False;
+	DoVSync := True;
+	DoHSync := True;
 	DoBloom := False;
-	DoAberration := False;
+	DoAberration := True;
 	DoVHSNoise := False;
-
-	if initialized then
-		OptionsChanged;
+	DoFadePhosphors := True;
 end;
 
-procedure TNTSCCRTBase.OptionsChanged;
+procedure TNTSCCRTBase.SetChromaPattern(Value: Byte);
+begin
+	if CRT_CHROMA_PATTERN <> Value then
+	begin
+		if Value > 2 then Value := 0;
+		CRT_CHROMA_PATTERN := Value;
+		Changed;
+	end;
+end;
+
+constructor TNTSCCRTBase.Create;
+begin
+	inherited Create;
+
+	CRT_CHROMA_PATTERN := 1;
+
+	CRT_TOP  := 21;  // first line with active video
+	CRT_BOT  := 261; // final line with active video
+	CRT_VRES := 262; // vertical resolution
+	CB_CYCLES := 10;
+	CRT_CB_FREQ := 4;   // carrier frequency relative to sample rate
+	CRT_CC_VPER := 1;
+	CRT_HSYNC_WINDOW := 8;
+	CRT_VSYNC_WINDOW := 8;
+	CRT_HSYNC_THRESH := 4;
+	CRT_VSYNC_THRESH := 94;
+
+	WHITE_LEVEL := 100;
+	BURST_LEVEL := 20;
+	BLACK_LEVEL := 7;
+	BLANK_LEVEL := 0;
+	SYNC_LEVEL  := -40;
+
+	MaxRandom := High(MaxInt);
+
+	Reset;
+	Changed;
+
+	{$IFDEF MEASURE_TIMING}
+	Timing.Measurer.Init;
+	{$ENDIF}
+end;
+
+procedure TNTSCCRTBase.InitPulses;
+
+	// convert nanosecond offset to its corresponding point on the sampled line
+	function ns2pos(ns: Integer): Integer; inline;
+	begin
+		Result := ns * CRT_HRES div LINE_ns;
+	end;
+
+begin
+	// starting points for all the different pulses
+	FP_BEG   := ns2pos(0);
+	SYNC_BEG := ns2pos(FP_ns);
+	BW_BEG   := ns2pos(FP_ns + SYNC_ns);
+	CB_BEG   := ns2pos(FP_ns + SYNC_ns + BW_ns);
+	BP_BEG   := ns2pos(FP_ns + SYNC_ns + BW_ns + CB_ns);
+	AV_BEG   := ns2pos(HB_ns);
+	AV_LEN   := ns2pos(AV_ns);
+end;
+
+procedure TNTSCCRTBase.Changed;
 
 	// kilohertz to line sample conversion
 	function kHz2L(kHz: Integer): Integer;
 	begin
-		if L_FREQ > 0.0 then
-			Result := Trunc((CRT_HRES * (kHz * 100) / L_FREQ))
+		if L_FREQ > 0 then
+			Result := Round((CRT_HRES * (kHz * 100) / L_FREQ))
 		else
 			Result := 0;
 	end;
 
+var
+	i: Integer;
 begin
+	randseed := 194;
+
+	HSync := 0;
+	VSync := 0;
+
+	// chroma clocks (subcarrier cycles) per line
+	case CRT_CHROMA_PATTERN of
+		1: CRT_CC_LINE := 2275;
+		2: CRT_CC_LINE := 2273;
+		else // this will give the 'rainbow' effect in the famous waterfall scene
+		   CRT_CC_LINE := 2280;
+	end;
+
+	CRT_HRES       := CRT_CC_LINE * CRT_CB_FREQ div 10; // horizontal resolution
+	CRT_INPUT_SIZE := CRT_HRES * CRT_VRES;
+	CRT_LINES      := CRT_BOT - CRT_TOP; // number of active video lines
+
+	InitPulses;
+
+	SetLength(ccf,    CRT_CC_VPER, CRT_CC_SAMPLES);
+	SetLength(analog, CRT_INPUT_SIZE);
+	SetLength(inp,    CRT_INPUT_SIZE);
+	SetLength(outrec, AV_LEN);
+
+	for i := 0 to CRT_CC_VPER-1 do
+		FillChar(ccf[i,0], CRT_CC_SAMPLES*SizeOf(Integer), 0);
+	FillChar(analog[0], SizeOf(analog[0]) * Length(analog), 0);
+	FillChar(inp[0],    SizeOf(inp[0])    * Length(inp), 0);
+	for i := 0 to Length(outrec)-1 do
+		outrec[i] := Default(TOutRec);
+
 	// band gains are pre-scaled as 16-bit fixed point
 	// if you change the EQ_P define, you'll need to update these gains too
 	//
@@ -505,108 +402,33 @@ begin
 	{$ENDIF}
 end;
 
-// Initializes the library. Sets up filters.
-// * Width  - width of the output image
-// * Height - height of the output image
-// * Format - format of the output image
-// * Buffer - pointer to output image data
-//
-constructor TNTSCCRTBase.Create(aWidth, aHeight: Word; aFormat: TCRTPixelFormat; Buffer: Pointer);
-
-	// convert nanosecond offset to its corresponding point on the sampled line
-	function ns2pos(ns: Integer): Integer; inline;
-	begin
-		Result := ns * CRT_HRES div LINE_ns;
-	end;
-
-begin
-	inherited Create;
-
-	initialized := False;
-
-	Reset;
-
-	CRT_CHROMA_PATTERN := 1;
-	CRT_VRES    := 262; // vertical resolution
-	CRT_CB_FREQ := 4; // carrier frequency relative to sample rate
-	CRT_CC_VPER := 1;
-	CB_CYCLES := 10;
-	CRT_HSYNC_THRESH := 4;
-	CRT_VSYNC_THRESH := 94;
-
-	DoInit;
-
-	// starting points for all the different pulses
-	FP_BEG    := ns2pos(0);
-	SYNC_BEG  := ns2pos(FP_ns);
-	BW_BEG    := ns2pos(FP_ns + SYNC_ns);
-	CB_BEG    := ns2pos(FP_ns + SYNC_ns + BW_ns);
-	BP_BEG    := ns2pos(FP_ns + SYNC_ns + BW_ns + CB_ns);
-	AV_BEG    := ns2pos(HB_ns);
-	AV_LEN    := ns2pos(AV_ns);
-
-	{if WHITE_LEVEL = 0 then} WHITE_LEVEL := 100;
-	{if BURST_LEVEL = 0 then} BURST_LEVEL := 20;
-	{if BLACK_LEVEL = 0 then} BLACK_LEVEL := 7;
-	{if BLANK_LEVEL = 0 then} BLANK_LEVEL := 0;
-	{if SYNC_LEVEL  = 0 then} SYNC_LEVEL  := -40;
-
-	Resize(aWidth, aHeight, aFormat, Buffer);
-end;
-
-procedure TNTSCCRTBase.DoInit;
-begin
-	// chroma clocks (subcarrier cycles) per line
-	//  0 = vertical  chroma (228 chroma clocks per line)
-	//  1 = checkered chroma (227.5 chroma clocks per line)
-	//  2 = sawtooth  chroma (227.3 chroma clocks per line)
-	case CRT_CHROMA_PATTERN of
-		1: CRT_CC_LINE := 2275;
-		2: CRT_CC_LINE := 2273;
-		else // this will give the 'rainbow' effect in the famous waterfall scene
-		   CRT_CC_LINE := 2280;
-	end;
-
-	CRT_HRES       := CRT_CC_LINE * CRT_CB_FREQ div 10; // horizontal resolution
-	CRT_INPUT_SIZE := CRT_HRES * CRT_VRES;
-	CRT_LINES      := CRT_BOT - CRT_TOP; // number of active video lines
-
-	SetLength(ccf,    CRT_CC_VPER+1, CRT_CC_SAMPLES+1);
-	SetLength(analog, CRT_INPUT_SIZE);
-	SetLength(inp,    CRT_INPUT_SIZE);
-	SetLength(outrec, AV_LEN);
-
-	randseed := 194;
-end;
-
 destructor TNTSCCRTBase.Destroy;
 begin
 	inherited Destroy;
 end;
 
-// Demodulates the NTSC signal generated by TCRT.Modulate()
-// * noise - the amount of noise added to the signal (0 - inf)
+// Demodulates the NTSC signal generated by Modulate()
 //
 procedure TNTSCCRTBase.Demodulate;
 label
 	found_vsync,
 	found_field;
+const
+	xnudge = -3;
+	ynudge = +3;
 var
 	yiqA, yiqB: ^TOutRec;
 	sig: PInt8;
 	i, j, line, rn: Integer;
 	s: Integer = 0;
-	field, ratio: Integer;
+	fld, ratio: Integer;
 	ccr: PInteger; // color carrier signal
-	//ccr: Cardinal;
 	huesn, huecs: Integer;
-	xnudge: Integer = -3;
-	ynudge: Integer = +3;
 	bright: Integer;
 	bpp, pitch: Integer;
 	prev_e: Integer; // filtered beam energy per scan line
 	max_e: Integer;  // approx maximum energy in a scan line
-	sn, cs, nn, lnn,
+	cs, nn,
 	aa, bb, LT, RT, p, n,
 	y, q, r, g, b,
 	scanL, dx,
@@ -617,21 +439,19 @@ var
 	cL, cR: PByte;
 	{$IFDEF CRT_CC_5_SAMPLES}
 	dciA, dciB, dcqA, dcqB,
-	ang, off180, off90,
+	sn, ang, off180, off90,
 	peakA, peakB: Integer;
 	waveI, waveQ: array [0..CRT_CC_SAMPLES-1] of Integer;
 	{$ELSE}
 	wave: array [0..CRT_CC_SAMPLES-1] of Integer;
 	{$ENDIF}
 begin
-	{$R-}
-	bpp := crt_bpp4fmt(Format);
-	if bpp = 0 then Exit;
+	bpp := crt_bpp4fmt[Format];
 	pitch := Width * bpp;
 
-	crt_sincos14(huesn, huecs, Trunc(((Hue mod 360) + 33) * 8192 / 180));
-	huesn := {%H-}huesn shr 11; // make 4-bit
-	huecs := {%H-}huecs shr 11;
+	crt_sincos14(huesn, huecs, (Hue mod 360 + 33) * 8192 div 180);
+	huesn := {%H-}SarLongint(huesn, 11); // make 4-bit
+	huecs := {%H-}SarLongint(huecs, 11);
 
 	rn := randseed;
 
@@ -639,6 +459,8 @@ begin
 	begin
 		// determine field before we add noise,
 		// otherwise it's not reliably recoverable
+		fld := CRT_HRES;
+
 		for i := -CRT_VSYNC_WINDOW to CRT_VSYNC_WINDOW-1 do
 		begin
 			line := POSMOD(VSync + i, CRT_VRES);
@@ -648,16 +470,16 @@ begin
 			begin
 				s += sig[j];
 				if s <= (CRT_VSYNC_THRESH * SYNC_LEVEL) then
+				begin
+					fld := j;
 					goto found_field;
+				end;
 			end;
 		end;
 
 found_field:
 		// if vsync signal was in second half of line, odd field
-		if j > (CRT_HRES div 2) then
-			field := 1
-		else
-			field := 0;
+		fld := BoolToVal[fld > (CRT_HRES div 2)];
 		VSync := -3;
 	end;
 
@@ -666,29 +488,37 @@ found_field:
 
     for i := 0 to CRT_INPUT_SIZE-1 do
 	begin
-        nn := noise;
+        nn := Noise;
+
 		if DoVHSNoise then
 		begin
-			rn := Trunc(Random(MaxInt));
-			if (i > (CRT_INPUT_SIZE - CRT_HRES * (16 + (Random(20) - 10)))) and
+			if (i > (CRT_INPUT_SIZE - CRT_HRES * 26)) and
+			   (i > (CRT_INPUT_SIZE - CRT_HRES * (16 + (Random(20) - 10)))) and
 			   (i < (CRT_INPUT_SIZE - CRT_HRES * ( 5 + (Random(8)  -  4)))) then
 			begin
-				lnn := i * line div CRT_HRES;
-				crt_sincos14(sn, cs, lnn * 8192 div 180);
+				cs := crt_cos14((i * {%H-}line) div CRT_HRES * 8192 div 180);
 				nn := SarLongint(cs, 8);
 			end;
+			rn := Random(MaxRandom);
 		end
 		else
 		begin
+			if nn > 128 then
+			begin
+				Dec(nn, 128);
+				nn := nn * nn div 4 + 129;
+			end;
 			rn := 214019 * rn + 140327895;
 		end;
+
         // signal + noise
-        s := analog[i] + SarLongint( (( SarLongint(rn, 16) and $FF) - $7F) * nn, 8);
+        s := analog[i] + SarLongint(((SarLongint(rn, 16) and $FF - $7F) * nn), 8);
         if s > +127 then s := +127
 		else
         if s < -127 then s := -127;
         inp[i] := s;
     end;
+
     randseed := rn;
 
 	if DoVSync then
@@ -701,6 +531,8 @@ found_field:
 		// vsync pulse is a lot longer than the hsync pulse.
 		// The signal needs to be integrated to lessen
 		// the noise in the signal.
+		fld := CRT_HRES;
+
 		for i := -CRT_VSYNC_WINDOW to CRT_VSYNC_WINDOW-1 do
 		begin
 			line := POSMOD(VSync + i, CRT_VRES);
@@ -712,34 +544,34 @@ found_field:
 				// increase the multiplier to make the vsync
 				// more stable when there is a lot of noise
 				if s <= (CRT_VSYNC_THRESH * SYNC_LEVEL) then
+				begin
+					fld := j;
 					goto found_vsync;
+				end;
 			end;
 		end;
 
 found_vsync:
 		VSync := line; // vsync found (or gave up) at this line
 		// if vsync signal was in second half of line, odd field
-		if j > (CRT_HRES div 2) then
-			field := 1
-		else
-			field := 0;
+		fld := BoolToVal[fld > (CRT_HRES div 2)];
 	end;
 
 	if DoBloom then
 	begin
-		max_e  := (128 + (noise div 2)) * AV_LEN;
+		max_e  := (128 + (Noise div 2)) * AV_LEN;
 		prev_e := 16384 div 8;
 	end;
 
     // ratio of output height to active video lines in the signal
     ratio := (Height << 16) div CRT_LINES;
     ratio := SarLongint(ratio + 32768, 16);
-    field := field * (ratio div 2);
+    fld := {%H-}fld * (ratio div 2);
 
     for line := CRT_TOP to CRT_BOT-1 do
 	begin
-        line_beg := (line - CRT_TOP + 0) * (Height + v_fac) div CRT_LINES + field;
-        line_end := (line - CRT_TOP + 1) * (Height + v_fac) div CRT_LINES + field;
+        line_beg := (line - CRT_TOP + 0) * (Height + v_fac) div CRT_LINES + fld;
+        line_end := (line - CRT_TOP + 1) * (Height + v_fac) div CRT_LINES + fld;
 
         if line_beg >= Height then Continue;
         if line_end >  Height then line_end := Height;
@@ -749,21 +581,25 @@ found_vsync:
         ln  := POSMOD(line + VSync, CRT_VRES) * CRT_HRES;
         sig := @inp[ln + HSync];
         s := 0;
+		j := CRT_HSYNC_WINDOW;
         for i := -CRT_HSYNC_WINDOW to CRT_HSYNC_WINDOW-1 do
 		begin
             s += sig[SYNC_BEG + i];
-            if s <= (CRT_HSYNC_THRESH * SYNC_LEVEL) then Break;
+            if s <= (CRT_HSYNC_THRESH * SYNC_LEVEL) then
+			begin
+				j := i;
+				Break;
+			end;
         end;
 
 		if DoHSync then
-			HSync := POSMOD(i + HSync, CRT_HRES)
+			HSync := POSMOD(j + HSync, CRT_HRES)
 		else
 			HSync := 0;
 
         xpos := POSMOD(AV_BEG + HSync + xnudge, CRT_HRES);
         ypos := POSMOD(line + VSync + ynudge, CRT_VRES);
-        pos  := xpos + ypos * CRT_HRES;
-        //ccr  := ypos mod CRT_CC_VPER;
+        pos  := ypos * CRT_HRES + xpos;
         ccr  := @ccf[ypos mod CRT_CC_VPER, 0];
 
 		{$IFDEF CRT_CC_5_SAMPLES}
@@ -774,11 +610,9 @@ found_vsync:
 
         for i := CB_BEG to CB_BEG + (CB_CYCLES * CRT_CB_FREQ) - 1 do
 		begin
-            //p := ccf[ccr, i mod CRT_CC_SAMPLES]  * 127 div 128; // fraction of the previous
-			p :=  ccr[i mod CRT_CC_SAMPLES] * 127 div 128; // fraction of the previous
+			p := ccr[i mod CRT_CC_SAMPLES] * 127 div 128; // fraction of the previous
             n := sig[i];                 // mixed with the new sample
             ccr[i mod CRT_CC_SAMPLES] := p + n;
-			//ccf[ccr, i mod CRT_CC_SAMPLES] := p + n;
         end;
 
         phasealign := POSMOD(HSync, CRT_CC_SAMPLES);
@@ -813,11 +647,9 @@ found_vsync:
 		// amplitude of carrier = saturation, phase difference = hue
 		dci := ccr[(phasealign + 1) and 3] - ccr[(phasealign + 3) and 3];
 		dcq := ccr[(phasealign + 2) and 3] - ccr[(phasealign + 0) and 3];
-//		dci := ccf[ccr, (phasealign + 1) and 3] - ccf[ccr, (phasealign + 3) and 3];
-//		dcq := ccf[ccr, (phasealign + 2) and 3] - ccf[ccr, (phasealign + 0) and 3];
 
-		wave[0] := Trunc(SarLongint((dci * huecs - dcq * huesn), 4) * (Saturation / 20));
-		wave[1] := Trunc(SarLongint((dcq * huecs + dci * huesn), 4) * (Saturation / 20));
+		wave[0] := Trunc(SarLongint((dci * huecs - dcq * huesn), 4) * (Saturation / 8));
+		wave[1] := Trunc(SarLongint((dcq * huecs + dci * huesn), 4) * (Saturation / 8));
 		wave[2] := -wave[0];
 		wave[3] := -wave[1];
 		{$ENDIF}
@@ -831,11 +663,11 @@ found_vsync:
 				s += sig[i]; // sum up the scan line
 
 			// bloom emulation
-			prev_e := (prev_e * 123 div 128) + (((SarLongint(max_e, 1) - s) << 10) div max_e);
+			prev_e := ({%H-}prev_e * 123 div 128) + (((SarLongint(max_e{%H-}, 1) - s) << 10) div {%H-}max_e);
 			line_w := (AV_LEN * 112 div 128) + SarLongint(prev_e, 9);
 
 			dx := (line_w << 12) div Width;
-			scanL := ((AV_LEN div 2) - (line_w >> 1) + 8) << 12;
+			scanL := ((AV_LEN div 2) - (SarLongint(line_w, 1)) + 8) << 12;
 			scanR := (AV_LEN - 1) << 12;
 
 			LT := SarLongint(scanL, 12);
@@ -876,8 +708,8 @@ found_vsync:
 		begin
             RT := pos and $FFF;
             LT := $FFF - RT;
-            s := SarLongint(pos, 12);
 
+            s := pos >> 12;
             yiqA := @outrec[s];
             yiqB := @outrec[s+1];
 
@@ -886,23 +718,10 @@ found_vsync:
             i := SarLongint(yiqA.i * LT, 14) + SarLongint(yiqB.i * RT, 14);
             q := SarLongint(yiqA.q * LT, 14) + SarLongint(yiqB.q * RT, 14);
 
-//			i := 0;
-//			q := ((yiqA.y * LT) >> 14) + ((yiqB.y * RT) >> 14); // Y but >> 14
-
             // YIQ to RGB
-            r := SarLongint(y + 3879 * i + 2556 * q, 12) * Contrast >> 8;
-            g := SarLongint(y - 1126 * i - 2605 * q, 12) * Contrast >> 8;
-            b := SarLongint(y - 4530 * i + 7021 * q, 12) * Contrast >> 8;
-
-            if r < 0   then r := 0
-			else
-            if r > 255 then r := 255;
-            if g < 0   then g := 0
-			else
-            if g > 255 then g := 255;
-            if b < 0   then b := 0
-			else
-            if b > 255 then b := 255;
+            r := ClampToByte(SarLongint(y + 3879 * i + 2556 * q, 12) * Contrast >> 8);
+            g := ClampToByte(SarLongint(y - 1126 * i - 2605 * q, 12) * Contrast >> 8);
+            b := ClampToByte(SarLongint(y - 4530 * i + 7021 * q, 12) * Contrast >> 8);
 
             if DoBlend then
 			begin
@@ -924,7 +743,7 @@ found_vsync:
                 end;
 
                 // blend with previous color there
-                bb := (((aa and $FEFEFF) >> 1) + ((bb and $FEFEFF) >> 1));
+                bb := (aa and $FEFEFF >> 1) + (bb and $FEFEFF >> 1);
             end
 			else
 			begin

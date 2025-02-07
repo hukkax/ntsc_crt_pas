@@ -3,22 +3,23 @@
  * NTSC/CRT - Integer-only NTSC video signal encoding / decoding emulation
  *
  *   by EMMIR 2018-2023
- *   FreePascal port by hukka 2025
+ *   FreePascal port by hukka 2025 with help from muzzy
  *
+ *   Github (original): https://github.com/LMP88959/NTSC-CRT
+ *   Github (FPC port): https://github.com/hukkax/ntsc_crt_pas
  *   YouTube: https://www.youtube.com/@EMMIR_KC/videos
  *   Discord: https://discord.com/invite/hdYctSmyQJ
  *
  *****************************************************************************}
 unit ntsc_crt;
 
-{$MODE Delphi}{$H+}
-{$POINTERMATH ON}
+{$I ntsc_crt_options.inc}
 
 interface
 
 uses
 	Classes, SysUtils,
-	ntsc_crt_base;
+	ntsc_crt_common, ntsc_crt_base;
 
 type
 	TNTSCCRT = class(TNTSCCRTBase)
@@ -31,15 +32,19 @@ type
 	public
 		property VHSMode: TVHSMode read FVHSMode write SetVHSMode;
 
-		constructor Create(aWidth, aHeight: Word; aFormat: TCRTPixelFormat; Buffer: Pointer); override;
+		constructor Create; override;
 
+		procedure Changed;  override;
 		procedure Modulate; override;
 	end;
 
 
 implementation
 
+{$R-}{$Q-}  // switch off overflow and range checking
 
+uses
+	Math;
 
 // ************************************************************************************************
 // Utility
@@ -62,8 +67,7 @@ const
 
 function EXP_MUL(x, y: Integer): Integer; inline;
 begin
-	{$R-}
-	Result := (x * y) >> EXP_P;
+	Result := SarLongint(x * y, EXP_P);
 end;
 
 function EXP_DIV(x, y: Integer): Integer; inline;
@@ -85,7 +89,7 @@ begin
 	if neg then
 		n := -n;
 
-	idx := n >> EXP_P;
+	idx := SarLongint(n, EXP_P);
 	for i := 0 to (idx div 4)-1 do
 		Result := EXP_MUL(Result, e11[4]);
 
@@ -121,7 +125,6 @@ type
 		c, h: Integer;
 
 		procedure init_iir(freq, limit: Integer);
-		procedure reset_iir;
 		function  iirf(s: Integer): Integer;
 	end;
 
@@ -135,19 +138,18 @@ procedure TIIRLP.init_iir(freq, limit: Integer);
 var
 	rate: Integer; // cycles/pixel rate
 begin
+	h := 0;
+	if limit = 0 then
+	begin
+		c := 0;
+		Exit;
+	end;
     rate := (freq << 9) div limit;
-	h := 0;
 	c := EXP_ONE - expx(-((EXP_PI << 9) div rate));
-end;
-
-procedure TIIRLP.reset_iir;
-begin
-	h := 0;
 end;
 
 function TIIRLP.iirf(s: Integer): Integer;
 begin
-	{$R-}
 	h += EXP_MUL(s - h, c);
 	Result := h;
 end;
@@ -158,7 +160,7 @@ end;
 
 procedure TNTSCCRT.SetVHSMode(Value: TVHSMode);
 begin
-	FVHSMode := Value;
+	L_FREQ := 1431818; // full line
 
 	// frequencies for bandlimiting
 	case Value of
@@ -188,29 +190,65 @@ begin
 		end;
 	end;
 
-	L_FREQ := 1431818; // full line
-
-	if initialized then
-		OptionsChanged;
+	FVHSMode := Value;
+	Changed;
 end;
 
-constructor TNTSCCRT.Create(aWidth, aHeight: Word; aFormat: TCRTPixelFormat; Buffer: Pointer);
+constructor TNTSCCRT.Create;
 begin
-	inherited Create(aWidth, aHeight, aFormat, Buffer);
+	inherited Create;
 
-	CRT_CHROMA_PATTERN := 1;
-	CRT_TOP := 21;  // first line with active video
-	CRT_BOT := 261; // final line with active video
-	CRT_HSYNC_WINDOW := 8;
-	CRT_VSYNC_WINDOW := 8;
-
-	VHSMode := VHS_SP;
 	DoAberration := True;
 	DoVHSNoise := True;
-	DoBloom := True;
+	DoBloom := False;
 
-	DoInit;
-	OptionsChanged;
+	FVHSMode := VHS_SP;
+	{
+	CRT_CHROMA_PATTERN := 0;
+	CRT_HSYNC_WINDOW := 8+4;
+	CRT_VSYNC_WINDOW := 8-2;
+	CRT_HSYNC_THRESH := 4-3;
+	CRT_VSYNC_THRESH := 94+0;
+	}
+
+	WHITE_LEVEL := 100;
+	BLACK_LEVEL := 7;
+	BLANK_LEVEL := 0;
+	SYNC_LEVEL  := -40;
+
+	Changed;
+end;
+
+procedure TNTSCCRT.Changed;
+begin
+	inherited;
+
+	if FVHSMode = VHS_NONE then
+	begin
+		MaxRandom := High(MaxInt);
+
+		CRT_HSYNC_WINDOW := 8;
+		CRT_VSYNC_WINDOW := 8;
+		CRT_HSYNC_THRESH := 4;
+		CRT_VSYNC_THRESH := 94;
+
+		BURST_LEVEL := 20;
+	end
+	else
+	begin
+		MaxRandom := High(Word);
+
+		// CRT_HSYNC_WINDOW := 3;
+		// CRT_HSYNC_THRESH := 4;
+		CRT_VSYNC_WINDOW := 4;
+		CRT_VSYNC_THRESH := 94+1;
+
+		BURST_LEVEL := 24;
+	end;
+
+	iirY.init_iir(L_FREQ, Y_FREQ);
+	iirI.init_iir(L_FREQ, I_FREQ);
+	iirQ.init_iir(L_FREQ, Q_FREQ);
 end;
 
 procedure TNTSCCRT.Modulate;
@@ -233,57 +271,47 @@ const
 	evens: array [0..3] of Byte = ( 46, 50, 96, 100 );
 	odds:  array [0..3] of Byte = (  4, 50, 96, 100 );
 var
-	x, y, xo, yo, sn, cs,
+	x, y, xo, yo, sn,
 	n, ph, bpp, t, cb, sy,
 	fy, fi, fq,
 	rA, gA, bA,
 	ire, xoff,
 	destw, desth,
+	aberration,
+	inv_phase,
 	field_offset: Integer;
-	inv_phase: Integer = 0;
 	iccf, ccmodI, ccmodQ, ccburst: array[0..CRT_CC_SAMPLES-1] of Integer; // color phases
 	line: PInt8;
-	aberration: Integer = 0;
-	offs: PByte;
+	offs: array of Byte;
 	pix: PByte;
-	//pix: Cardinal;
 begin
-	{$R-}
-	destw := AV_LEN;
-	desth := (CRT_LINES * 64500) >> 16;
-
-	if not initialized then
-	begin
-		iirY.init_iir(L_FREQ, Y_FREQ);
-		iirI.init_iir(L_FREQ, I_FREQ);
-		iirQ.init_iir(L_FREQ, Q_FREQ);
-		initialized := True;
-	end;
+	bpp := crt_bpp4fmt[Format];
 
 	if not Stretch then
 	begin
-		destw := Width;
-		desth := Height;
 		if DoBloom then
 		begin
-			if destw > ((AV_LEN * 55500) >> 16) then
-				destw := (AV_LEN * 55500) >> 16;
-			if desth > ((CRT_LINES * 63500) >> 16) then
-				desth := (CRT_LINES * 63500) >> 16;
+		   destw := Min(Width,  SarLongint(AV_LEN    * 55500, 16));
+		   desth := Min(Height, SarLongint(CRT_LINES * 63500, 16));
 		end
 		else
 		begin
-			if destw > AV_LEN then
-				destw := AV_LEN;
-			if desth > ((CRT_LINES * 64500) >> 16) then
-				desth := (CRT_LINES * 64500) >> 16;
+			destw := Min(Width,  AV_LEN);
+			desth := Min(Height, SarLongint(CRT_LINES * 64500, 16));
 		end;
 	end
 	else
-	if DoBloom then
 	begin
-		destw := (AV_LEN * 55500) >> 16;
-		desth := (CRT_LINES * 63500) >> 16;
+		if DoBloom then
+		begin
+			destw := SarLongint(AV_LEN    * 55500, 16);
+			desth := SarLongint(CRT_LINES * 63500, 16);
+		end
+		else
+		begin
+			destw := AV_LEN;
+			desth := SarLongint(CRT_LINES * 64500, 16);
+		end;
 	end;
 
 	if not Monochrome then
@@ -291,23 +319,20 @@ begin
 		for x := 0 to CRT_CC_SAMPLES-1 do
 		begin
 			n := Hue + x * (360 div CRT_CC_SAMPLES);
-			crt_sincos14(sn, cs, (n + 33) * 8192 div 180);
-			ccburst[x] := SarLongint(sn, 10) and $FF;
-			crt_sincos14(sn, cs, n * 8192 div 180);
+			sn := crt_sin14((n + 33) * 8192 div 180);
+			ccburst[x] := SarLongint(sn, 10);
+			sn := crt_sin14(n * 8192 div 180);
 			ccmodI[x] := SarLongint(sn, 10);
-			crt_sincos14(sn, cs, (n - 90) * 8192 div 180);
+			sn := crt_sin14((n - 90) * 8192 div 180);
 			ccmodQ[x] := SarLongint(sn, 10);
 		end;
 	end
 	else
 	begin
-		FillByte(ccburst[0], Length(ccburst)*SizeOf(Integer), 0);
-		FillByte(ccmodI[0],  Length(ccmodI) *SizeOf(Integer), 0);
-		FillByte(ccmodQ[0],  Length(ccmodQ) *SizeOf(Integer), 0);
+		FillChar({%H-}ccburst[0], Length(ccburst)*SizeOf(Integer), 0);
+		FillChar({%H-}ccmodI[0],  Length(ccmodI) *SizeOf(Integer), 0);
+		FillChar({%H-}ccmodQ[0],  Length(ccmodQ) *SizeOf(Integer), 0);
 	end;
-
-	bpp := crt_bpp4fmt(Format);
-	if bpp = 0 then Exit; // just to be safe
 
 	xo := AV_BEG  + xoffset + (AV_LEN    - destw) div 2;
 	yo := CRT_TOP + yoffset + (CRT_LINES - desth) div 2;
@@ -315,7 +340,7 @@ begin
 	field := field and 1;
 	frame := frame and 1;
 	if field = frame then
-		inv_phase := 1
+		inv_phase := BoolToVal[field = frame]
 	else
 		inv_phase := 0;
 	ph := CC_PHASE(inv_phase);
@@ -323,7 +348,14 @@ begin
 	// align signal
 	xo := xo and (not 3);
     if DoAberration then
-		aberration := (Random(12) - 8) + 14;
+		aberration := (Random(12) - 8) + 20 // 14
+	else
+		aberration := 0;
+
+	if field = 1 then
+	    offs := @odds
+	else
+		offs := @evens;
 
 	for n := 0 to CRT_VRES-1 do
 	begin
@@ -341,10 +373,6 @@ begin
 		else
 		if (n >= 4) and (n <= 6) then
 		begin
-			if field = 1 then
-			    offs := @odds[0]
-			else
-				offs := @evens[0];
 			// vertical sync pulse - small blips of blank, mostly sync
 			while t < (offs[0] * CRT_HRES div 100) do begin line[t] := SYNC_LEVEL;  Inc(t); end;
 			while t < (offs[1] * CRT_HRES div 100) do begin line[t] := BLANK_LEVEL; Inc(t); end;
@@ -354,13 +382,13 @@ begin
 		else
 		begin
 			// video line
-			if (not DoAberration) or (n < (CRT_VRES - aberration)) then
+			if n < (CRT_VRES - aberration) then
 			begin
 				while t < SYNC_BEG do begin line[t] := BLANK_LEVEL; Inc(t); end; // FP
 				while t < BW_BEG   do begin line[t] := SYNC_LEVEL;  Inc(t); end; // SYNC
 			end;
+			while t < AV_BEG do begin line[t] := BLANK_LEVEL; Inc(t); end; // BW + CB + BP
 
-			while t < AV_BEG   do begin line[t] := BLANK_LEVEL; Inc(t); end; // BW + CB + BP
 			if n < CRT_TOP then
 				while t < CRT_HRES do begin line[t] := BLANK_LEVEL; Inc(t); end;
 
@@ -371,14 +399,14 @@ begin
 					cb := ccburst[(t + inv_phase * (CRT_CC_SAMPLES div 2)) mod CRT_CC_SAMPLES]
 				else
 					cb := ccburst[t mod CRT_CC_SAMPLES];
-				line[t] := SarLongint( ((BLANK_LEVEL + (cb * BURST_LEVEL))), 5);
+				line[t] := SarLongint(cb * BURST_LEVEL + BLANK_LEVEL, 5);
 				iccf[t mod CRT_CC_SAMPLES] := line[t];
 			end;
 		end;
 	end;
 
 	// reset hsync every frame so only the bottom part is warped
-	if VHSMode <> VHS_NONE then
+	//if VHSMode <> VHS_NONE then
 		HSync := 0;
 
 	for y := 0 to desth-1 do
@@ -389,14 +417,14 @@ begin
 		if sy > Height then sy := Height;
 		sy := sy * Width;
 
-		iirY.reset_iir;
-		iirI.reset_iir;
-		iirQ.reset_iir;
+		iirY.h := 0;
+		iirI.h := 0;
+		iirQ.h := 0;
 
 		for x := 0 to destw-1 do
 		begin
-			//pix := (((x * Width) div destw) + sy) * bpp;
-			pix := @data[(((x * Width) div destw) + sy) * bpp];
+			pix := @data[(x * Width div destw + sy) * bpp];
+
 			case Format of
 				CRT_PIX_FORMAT_RGB,
 				CRT_PIX_FORMAT_RGBA:
@@ -437,11 +465,12 @@ begin
 			ire := BLACK_LEVEL + Black_point;
 
 			xoff := (x + xo) mod CRT_CC_SAMPLES;
+
 			// bandlimit Y,I,Q
 			fy := iirY.iirf(fy);
 			fi := SarLongint(iirI.iirf(fi) * ph * ccmodI[xoff], 4);
 			fq := SarLongint(iirQ.iirf(fq) * ph * ccmodQ[xoff], 4);
-			ire += SarLongint( (fy + fi + fq) * (WHITE_LEVEL * White_point div 100), 10);
+			ire += SarLongint((fy + fi + fq) * (WHITE_LEVEL * White_point div 100), 10);
 			if ire < 0   then ire := 0
 			else
 			if ire > 110 then ire := 110;
@@ -453,8 +482,7 @@ begin
 	if VHSMode <> VHS_NONE then
 	begin
 		for n := 0 to CRT_CC_VPER-1 do
-			for x := 0 to CRT_CC_SAMPLES-1 do
-				ccf[n,x] := 0;
+			FillChar(ccf[n,0], CRT_CC_SAMPLES*SizeOf(Integer), 0);
 	end
 	else
 	begin
@@ -463,6 +491,7 @@ begin
 				ccf[n,x] := iccf[x] << 7;
 	end;
 end;
+
 
 end.
 
