@@ -1,0 +1,23 @@
+Keyboard shortcuts for the interactive examples
+(only BGRABitmap example for now)
+
+ESC:        Quit
+Space:      Pause/unpause
+Return:     Load new image
+M:          Toggle monochrome/color mode
+P:          Toggle progressive/interlaced
+B:          Toggle blending
+L:          Toggle bloom
+S:          Toggle scanlines
+A:          Toggle aberration (VHS skew at bottom of image)
+V:          Toggle vertical sync
+H:          Toggle horizontal sync
+N:          Toggle VHS noise
+0:          Turn off VHS mode
+1:          Set VHS mode to normal quality
+2:          Set VHS mode to medium (long play) quality
+3:          Set VHS mode to worst (extended play) quality
+C:          Change chroma pattern
+Num +/-:    Modify amount of noise (affects visuals and sync)
+Up/Down:    Modify color saturation
+Left/Right: Modify color hue
