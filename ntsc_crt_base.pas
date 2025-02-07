@@ -133,6 +133,8 @@ type
 		Width,
 		Height:      Word;    // output width/height
 
+		UseSourceResolution: Boolean; // False=process in NTSC resolution
+
 		xoffset:     Word;    // x offset in sample space. 0 is minimum value
 		yoffset:     Word;    // y offset in # of lines. 0 is minimum value
 
@@ -249,9 +251,20 @@ end;
 procedure TNTSCCRTBase.Resize(aWidth, aHeight: Word; aFormat: TCRTPixelFormat; DestBuffer: Pointer);
 begin
 	Width  := aWidth;
-	Height := aHeight;
 	Format := aFormat;
 	output := DestBuffer;
+
+	if aHeight <> Height then
+	begin
+		Height := aHeight;
+
+		if UseSourceResolution then
+		begin
+			CRT_VRES := Height; //262; // vertical resolution
+			CRT_BOT  := CRT_VRES-1; // final line with active video
+			Changed;
+		end;
+	end;
 end;
 
 // Resets the CRT settings back to their defaults
@@ -259,7 +272,7 @@ end;
 procedure TNTSCCRTBase.Reset;
 begin
 	Hue         := 0;
-	Saturation  := 75;
+	Saturation  := 80;
 	Brightness  := 0;
 	Contrast    := 180;
 	Black_point := 0;
@@ -295,11 +308,13 @@ constructor TNTSCCRTBase.Create;
 begin
 	inherited Create;
 
+	UseSourceResolution := True;
+
 	CRT_CHROMA_PATTERN := 1;
 
-	CRT_TOP  := 21;  // first line with active video
-	CRT_BOT  := 261; // final line with active video
 	CRT_VRES := 262; // vertical resolution
+	CRT_TOP  := 21;  // first line with active video
+	CRT_BOT  := CRT_VRES-1; // final line with active video
 	CB_CYCLES := 10;
 	CRT_CB_FREQ := 4;   // carrier frequency relative to sample rate
 	CRT_CC_VPER := 1;
