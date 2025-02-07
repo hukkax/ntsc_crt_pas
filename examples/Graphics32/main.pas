@@ -1,6 +1,6 @@
 unit Main;
 
-{$mode Delphi}{$H+}
+{$I ../../ntsc_crt_options.inc}
 
 interface
 
@@ -30,8 +30,7 @@ implementation
 {$R *.lfm}
 
 uses
-	ntsc_crt_base in '../../ntsc_crt_base.pas',
-	ntsc_crt in '../../ntsc_crt.pas';
+	ntsc_crt_common, ntsc_crt_base, ntsc_crt;
 
 var
 	CRT: TNTSCCRT;
@@ -56,8 +55,7 @@ begin
 
 	image := TBitmap32.Create;
 
-	image.LoadFromFile('../dog.png');
-//	image.LoadFromFile('../colorspace.png');
+	image.LoadFromFile('../ti.png');
 
 	W := image.Width;
 	H := image.Height;
@@ -68,19 +66,21 @@ begin
 
 	output := TBitmap32.Create(W, H);
 
-	CRT := TNTSCCRT.Create(W, H, CRT_PIX_FORMAT_RGBA, @output.Bits[0]);
+	CRT := TNTSCCRT.Create;
+	CRT.Resize(W, H, CRT_PIX_FORMAT_RGBA, @output.Bits[0]);
 
 	CRT.Stretch := True;
 	CRT.Monochrome := False;
 	CRT.Progressive := False;
 	CRT.Scanlines := 0;
-	CRT.Noise := 9;
+	CRT.Noise := 2;
 	CRT.DoBlend := False;
 	CRT.DoVSync := True;
 	CRT.DoHSync := True;
 	CRT.DoBloom := False;
 	CRT.DoAberration := True;
 	CRT.DoVHSNoise := True;
+	CRT.VHSMode := VHS_SP;
 
 	Timer.Enabled := True;
 end;
@@ -120,17 +120,6 @@ begin
 		// exit
 		VK_ESCAPE:
 			Close;
-
-		// toggle between original and processed image
-		VK_SPACE:
-		begin
-			Timer.Enabled := not Timer.Enabled;
-			if not Timer.Enabled then
-			begin
-				pb.Buffer.Draw(0, 0, image);
-				pb.Invalidate;
-			end;
-		end;
 
 		// toggle monochrome/color mode
 		VK_M:
