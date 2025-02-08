@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CONFIG>
+  <Package Version="5">
+    <PathDelim Value="\"/>
+    <Name Value="NTSC_CRT_pkg"/>
+    <Type Value="RunAndDesignTime"/>
+    <CompilerOptions>
+      <Version Value="11"/>
+      <PathDelim Value="\"/>
+      <SearchPaths>
+        <UnitOutputDirectory Value="lib\$(TargetCPU)-$(TargetOS)\"/>
+      </SearchPaths>
+    </CompilerOptions>
+    <Files>
+      <Item>
+        <Filename Value="ntsc_crt.pas"/>
+        <UnitName Value="ntsc_crt"/>
+      </Item>
+      <Item>
+        <Filename Value="ntsc_crt_base.pas"/>
+        <UnitName Value="ntsc_crt_base"/>
+      </Item>
+      <Item>
+        <Filename Value="ntsc_crt_nes.pas"/>
+        <UnitName Value="ntsc_crt_nes"/>
+      </Item>
+      <Item>
+        <Filename Value="ntsc_crt_options.inc"/>
+        <Type Value="Include"/>
+      </Item>
+      <Item>
+        <Filename Value="ntsc_crt_snes.pas"/>
+        <UnitName Value="ntsc_crt_snes"/>
+      </Item>
+      <Item>
+        <Filename Value="TimeMeasurer.pas"/>
+        <UnitName Value="TimeMeasurer"/>
+      </Item>
+    </Files>
+    <RequiredPkgs>
+      <Item>
+        <PackageName Value="FCL"/>
+      </Item>
+    </RequiredPkgs>
+    <UsageOptions>
+      <UnitPath Value="$(PkgOutDir)"/>
+    </UsageOptions>
+    <PublishOptions>
+      <Version Value="2"/>
+      <UseFileFilters Value="True"/>
+    </PublishOptions>
+  </Package>
+</CONFIG>
