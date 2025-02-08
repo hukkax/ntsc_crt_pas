@@ -5,22 +5,23 @@
  * An interface to convert NES PPU output in RGB form to an analog NTSC signal.
  *
  *   by EMMIR 2018-2023
- *   FreePascal port by hukka 2025
+ *   FreePascal port by hukka 2025 with help from muzzy
  *
+ *   Github (original): https://github.com/LMP88959/NTSC-CRT
+ *   Github (FPC port): https://github.com/hukkax/ntsc_crt_pas
  *   YouTube: https://www.youtube.com/@EMMIR_KC/videos
  *   Discord: https://discord.com/invite/hdYctSmyQJ
  *
  *****************************************************************************}
 unit ntsc_crt_nes;
 
-{$MODE Delphi}{$H+}
-{$POINTERMATH ON}
+{$I ntsc_crt_options.inc}
 
 interface
 
 uses
 	Classes, SysUtils,
-	ntsc_crt_base;
+	ntsc_crt_common, ntsc_crt_base;
 
 type
 	TNTSCCRT_NES = class(TNTSCCRTBase)
@@ -38,63 +39,78 @@ type
 		// line duration should be ~63500 ns
 		LINE_PPUpx = (FP_PPUpx + SYNC_PPUpx + BW_PPUpx + CB_PPUpx + BP_PPUpx + PS_PPUpx + LB_PPUpx + AV_PPUpx + RB_PPUpx);
 	protected
-	// convert pixel offset to its corresponding point on the sampled line
+		procedure InitPulses; override;
+
 		function  PPUpx2pos(PPUpx: Integer): Integer; inline;
+
 		procedure SetupField;
 	public
 		dot_crawl_offset: 0..2;
-		border_color:     Cardinal; // either BG or black
 
-		constructor Create(aWidth, aHeight: Word; aFormat: TCRTPixelFormat; Buffer: Pointer); override;
+		constructor Create; override;
 
+		procedure Changed;  override;
 		procedure Modulate; override;
 	end;
 
 
 implementation
 
-// ************************************************************************************************
-// Utility
-// ************************************************************************************************
-
-// ************************************************************************************************
-// Filters
-// ************************************************************************************************
+{$R-}{$Q-}  // switch off overflow and range checking
 
 // ************************************************************************************************
 // TNTSCCRT_NES
 // ************************************************************************************************
 
-constructor TNTSCCRT_NES.Create(aWidth, aHeight: Word; aFormat: TCRTPixelFormat; Buffer: Pointer);
+constructor TNTSCCRT_NES.Create;
 begin
-	inherited Create(aWidth, aHeight, aFormat, Buffer);
+	inherited Create;
 
 	CRT_CHROMA_PATTERN := 2;
 
-	CRT_TOP        := 15;  // first line with active video
-	CRT_BOT        := 255; // final line with active video
-	CRT_CC_VPER    := 3;   // vertical period in which the artifacts repeat
-	CRT_HSYNC_WINDOW := 6; // search windows, in samples
+	CRT_TOP          := 15;  // first line with active video
+	CRT_BOT          := 255; // final line with active video
+	CRT_CB_FREQ      := 4;   // carrier frequency relative to sample rate
+	CRT_CC_VPER      := 3;   // vertical period in which the artifacts repeat
+	CRT_HSYNC_WINDOW := 6;   // search windows, in samples
 	CRT_VSYNC_WINDOW := 6;
+	CRT_HSYNC_THRESH := 4;
+	CRT_VSYNC_THRESH := 94;
 
-	// starting points for all the different pulses
-	FP_BEG   := PPUpx2pos(0);                                           // front porch point
-	SYNC_BEG := PPUpx2pos(FP_PPUpx);                                    // sync tip point
-	BW_BEG   := PPUpx2pos(FP_PPUpx + SYNC_PPUpx);                       // breezeway point
-	CB_BEG   := PPUpx2pos(FP_PPUpx + SYNC_PPUpx + BW_PPUpx);            // color burst point
-	BP_BEG   := PPUpx2pos(FP_PPUpx + SYNC_PPUpx + BW_PPUpx + CB_PPUpx); // back porch point
-	//LAV_BEG  := PPUpx2pos(HB_PPUpx);                                    // full active video point
-	AV_BEG   := PPUpx2pos(HB_PPUpx + PS_PPUpx + LB_PPUpx);              // PPU active video point
-	AV_LEN   := PPUpx2pos(AV_PPUpx);                                    // active video length
+	// IRE units (100 = 1.0V, -40 = 0.0V)
+	// https://www.nesdev.org/wiki/NTSC_video#Terminated_measurement
+	WHITE_LEVEL := 100;
+	BURST_LEVEL := 30;
+	BLACK_LEVEL := 0;
+	BLANK_LEVEL := 0;
+	SYNC_LEVEL  := -37;
 
-	DoInit;
-	OptionsChanged;
+	Changed;
+end;
+
+procedure TNTSCCRT_NES.Changed;
+begin
+	inherited;
+
+	SetupField;
 end;
 
 // convert pixel offset to its corresponding point on the sampled line
 function TNTSCCRT_NES.PPUpx2pos(PPUpx: Integer): Integer; inline;
 begin
 	Result := PPUpx * CRT_HRES div LINE_PPUpx;
+end;
+
+procedure TNTSCCRT_NES.InitPulses;
+begin
+	// starting points for all the different pulses
+	FP_BEG   := PPUpx2pos(0);                                           // front porch point
+	SYNC_BEG := PPUpx2pos(FP_PPUpx);                                    // sync tip point
+	BW_BEG   := PPUpx2pos(FP_PPUpx + SYNC_PPUpx);                       // breezeway point
+	CB_BEG   := PPUpx2pos(FP_PPUpx + SYNC_PPUpx + BW_PPUpx);            // color burst point
+	BP_BEG   := PPUpx2pos(FP_PPUpx + SYNC_PPUpx + BW_PPUpx + CB_PPUpx); // back porch point
+	AV_BEG   := PPUpx2pos(HB_PPUpx + PS_PPUpx + LB_PPUpx);              // PPU active video point
+	AV_LEN   := PPUpx2pos(AV_PPUpx);                                    // active video length
 end;
 
 procedure TNTSCCRT_NES.SetupField;
@@ -140,44 +156,34 @@ procedure TNTSCCRT_NES.Modulate;
 			Result := 1;
 	end;
 
-const
-	evens: array [0..3] of Byte = ( 46, 50, 96, 100 );
-	odds:  array [0..3] of Byte = (  4, 50, 96, 100 );
 var
-	n, x, y, xo, yo, sn, cs, t, cb, sy,
+	n, x, y, xo, yo, sn, t, cb, sy,
 	destw, desth, bpp, ire, xoff,
 	rA, gA, bA, fy, fi, fq: Integer;
 	ccmodI, ccmodQ, ccburst, iccf: array[0..{CRT_CC_VPER}3-1, 0..CRT_CC_SAMPLES-1] of Integer; // color phases
 	line: PInt8;
 	pix: PByte;
 begin
-	{$R-}
     destw := AV_LEN;
     desth := CRT_LINES;
+	bpp := crt_bpp4fmt[Format];
 
-	if not initialized then
-	begin
-		SetupField;
-		initialized := True;
-	end;
+	dot_crawl_offset := (dot_crawl_offset + 1) mod 3;
 
-	for y := 0 to CRT_CC_VPER - 1 do
+	for y := 0 to CRT_CC_VPER-1 do
 	begin
 		xo := (y + dot_crawl_offset) * (360 div CRT_CC_VPER);
-		for x := 0 to CRT_CC_SAMPLES - 1 do
+		for x := 0 to CRT_CC_SAMPLES-1 do
 		begin
 			n := xo + x * (360 div CRT_CC_SAMPLES);
-			crt_sincos14(sn, cs, (Hue + 90 + n + 33) * 8192 div 180);
+			sn := crt_sin14((Hue + 90 + n + 33) * 8192 div 180);
 			ccburst[y,x] := SarLongint(sn, 10);
-			crt_sincos14(sn, cs, n * 8192 div 180);
+			sn := crt_sin14(n * 8192 div 180);
 			ccmodI [y,x] := SarLongint(sn, 10);
-			crt_sincos14(sn, cs, (n - 90) * 8192 div 180);
+			sn := crt_sin14((n - 90) * 8192 div 180);
 			ccmodQ [y,x] := SarLongint(sn, 10);
 		end;
 	end;
-
-	bpp := crt_bpp4fmt(Format);
-	if bpp = 0 then Exit; // just to be safe
 
 	xo := AV_BEG  + xoffset;
 	yo := CRT_TOP + yoffset;
@@ -199,14 +205,14 @@ begin
 		for t := CB_BEG to CB_BEG + (CB_CYCLES * CRT_CB_FREQ) - 1 do
 		begin
 			cb := ccburst[n, t mod CRT_CC_SAMPLES];
-			line[t] := SarLongint( ((BLANK_LEVEL + (cb * BURST_LEVEL))), 5);
+			line[t] := SarLongint(cb * BURST_LEVEL + BLANK_LEVEL, 5);
 			iccf[n, t mod CRT_CC_SAMPLES] := line[t];
 		end;
 		sy *= Width;
 
 		for x := 0 to destw-1 do
 		begin
-			pix := @data[(((x * Width) div destw) + sy) * bpp];
+			pix := @data[(x * Width div destw + sy) * bpp];
 			case Format of
 				CRT_PIX_FORMAT_RGB,
 				CRT_PIX_FORMAT_RGBA:
@@ -250,7 +256,7 @@ begin
 
             fi  := SarLongint(fi * ccmodI[n, xoff], 4);
             fq  := SarLongint(fq * ccmodQ[n, xoff], 4);
-			ire += SarLongint( (fy + fi + fq) * (WHITE_LEVEL * White_point div 100), 10);
+			ire += SarLongint((fy + fi + fq) * (WHITE_LEVEL * White_point div 100), 10);
 			if ire < 0   then ire := 0
 			else
 			if ire > 110 then ire := 110;
